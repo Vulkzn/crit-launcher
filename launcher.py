@@ -676,10 +676,13 @@ def ensure_mc_textures() -> dict:
 
 
 class JsonStore:
-    def __init__(self, path: Path, default):
+    def __init__(self, path: Path, default, sensitive: bool = False):
         self.path = path
         self._lock = threading.RLock()
         self._default = default
+        self._sensitive = sensitive
+        if self.path.exists() and sensitive and os.name == "posix":
+            os.chmod(self.path, 0o600)
         if not self.path.exists():
             self._write(default)
 
@@ -688,6 +691,8 @@ class JsonStore:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, self.path)
+        if self._sensitive and os.name == "posix":
+            os.chmod(self.path, 0o600)
 
     def _read(self):
         try:
@@ -714,7 +719,7 @@ class JsonStore:
             return data
 
 
-accounts_store = JsonStore(ACCOUNTS_FILE, [])
+accounts_store = JsonStore(ACCOUNTS_FILE, [], sensitive=True)
 THEMES = ("green", "blue", "purple", "red", "orange", "pink", "custom")
 UI_STYLES = ("default", "minecraft", "modrinth", "fastclient", "sklauncher")
 ADDON_VIEWS = ("browse", "installed")
@@ -3814,7 +3819,11 @@ def ely_sign_in(username: str, password: str, totp: str = "") -> dict:
     if totp:
         password = password + ":" + totp
     payload = {"username": username, "password": password, "clientToken": _ely_client_token()}
-    status, data = ely_post(ELY_AUTH, payload)
+    try:
+        status, data = ely_post(ELY_AUTH, payload)
+    except Exception:
+        # traceback would include the frame holding the plaintext password
+        raise AuthError("Couldn't reach Ely.by. Check your connection.") from None
     message = (data or {}).get("errorMessage") or (data or {}).get("error") or ""
     if status == 401 and "two factor" in message.lower():
         raise AuthError("__totp__")
@@ -3856,7 +3865,10 @@ def refresh_ely_account(account: dict) -> dict:
     client_token = account.get("ely_client_token") or _ely_client_token()
     if not token:
         raise AuthError("Sign in with Ely.by again.")
-    status, data = ely_post(ELY_REFRESH, {"accessToken": token, "clientToken": client_token})
+    try:
+        status, data = ely_post(ELY_REFRESH, {"accessToken": token, "clientToken": client_token})
+    except Exception:
+        raise AuthError("Couldn't reach Ely.by to refresh your session.") from None
     if status != 200 or not data.get("accessToken"):
         raise AuthError("Your Ely.by session expired. Sign in again from the Accounts page.")
     new_token = data["accessToken"]
@@ -6114,7 +6126,7 @@ class API(ServerMixin):
                         "error": "This account has two-factor enabled. Enter the code from your app."}
             return {"success": False, "error": str(exc) or "Ely.by sign-in failed."}
         except Exception:
-            log_exception("add_ely_account")
+            logging.warning("add_ely_account failed")
             return {"success": False, "error": "Couldn't reach Ely.by. Check your connection."}
 
     def add_account(self, username):
